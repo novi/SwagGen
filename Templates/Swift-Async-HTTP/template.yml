@@ -40,6 +40,7 @@ templateFiles:
   - path: Sources/APIResult.swift
   - path: Sources/RequestBehaviour.swift
   - path: Sources/AnyCodable.swift
+  - path: Sources/FoundationNetworking-shims.swift
   - path: Podspec.podspec
     destination: "{{ options.name }}.podspec"
   - path: Sources/Enum.swift
