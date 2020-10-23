@@ -1,6 +1,9 @@
 {% include "Includes/Header.stencil" %}
 
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 
 public class APIRequest<ResponseType: APIResponseValue> {
 
