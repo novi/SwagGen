@@ -1,7 +1,9 @@
 {% include "Includes/Header.stencil" %}
 
 import Foundation
-import Alamofire
+import AsyncHTTPClient
+import NIO
+import NIOHTTP1
 
 /// Manages and sends APIRequests
 public class APIClient {
@@ -15,7 +17,8 @@ public class APIClient {
     public var baseURL: String
 
     /// The Alamofire SessionManager used for each request
-    public var sessionManager: SessionManager
+    // public var sessionManager: SessionManager
+    public var httpClient: HTTPClient
 
     /// These headers will get added to every request
     public var defaultHeaders: [String: String]
@@ -25,13 +28,14 @@ public class APIClient {
 
     public var decodingQueue = DispatchQueue(label: "apiClient", qos: .utility, attributes: .concurrent)
 
-    public init(baseURL: String, sessionManager: SessionManager = .default, defaultHeaders: [String: String] = [:], behaviours: [RequestBehaviour] = []) {
+    public init(baseURL: String, httpClient: HTTPClient = .init(eventLoopGroupProvider: .createNew), defaultHeaders: [String: String] = [:], behaviours: [RequestBehaviour] = []) {
         self.baseURL = baseURL
-        self.sessionManager = sessionManager
+        // self.sessionManager = sessionManager
+        self.httpClient = httpClient
         self.behaviours = behaviours
         self.defaultHeaders = defaultHeaders
         jsonDecoder.dateDecodingStrategy = .custom(dateDecoder)
-        jsonEncoder.dateEncodingStrategy = .formatted({{ options.name }}.dateEncodingFormatter)
+        jsonEncoder.dateEncodingStrategy = .formatted(RecopiAPI.dateEncodingFormatter)
     }
 
     /// Makes a network request
@@ -43,7 +47,7 @@ public class APIClient {
     ///   - complete: A closure that gets passed the APIResponse
     /// - Returns: A cancellable request. Not that cancellation will only work after any validation RequestBehaviours have run
     @discardableResult
-    public func makeRequest<T>(_ request: APIRequest<T>, behaviours: [RequestBehaviour] = [], completionQueue: DispatchQueue = DispatchQueue.main, complete: @escaping (APIResponse<T>) -> Void) -> CancellableRequest? {
+    public func makeRequest<T>(_ request: APIRequest<T>, behaviours: [RequestBehaviour] = []) -> EventLoopFuture<APIResponse<T>> {
         // create composite behaviour to make it easy to call functions on array of behaviours
         let requestBehaviour = RequestBehaviourGroup(request: request, behaviours: self.behaviours + behaviours)
 
@@ -55,8 +59,7 @@ public class APIClient {
             let error = APIClientError.requestEncodingError(error)
             requestBehaviour.onFailure(error: error)
             let response = APIResponse<T>(request: request, result: .failure(error))
-            complete(response)
-            return nil
+            return httpClient.eventLoopGroup.next().makeSucceededFuture(response)
         }
 
         // add the default headers
@@ -69,27 +72,32 @@ public class APIClient {
 
         urlRequest = requestBehaviour.modifyRequest(urlRequest)
 
-        let cancellableRequest = CancellableRequest(request: request.asAny())
+        // let cancellableRequest = CancellableRequest(request: request.asAny())
 
+        let resultPromise = httpClient.eventLoopGroup.next().makePromise(of: APIResponse<T>.self)
+        
         requestBehaviour.validate(urlRequest) { result in
             switch result {
             case .success(let urlRequest):
-                self.makeNetworkRequest(request: request, urlRequest: urlRequest, cancellableRequest: cancellableRequest, requestBehaviour: requestBehaviour, completionQueue: completionQueue, complete: complete)
+                let f = self.makeNetworkRequest(request: request, urlRequest: urlRequest, requestBehaviour: requestBehaviour)
+                resultPromise.completeWith(f)
             case .failure(let error):
                 let error = APIClientError.validationError(error)
                 let response = APIResponse<T>(request: request, result: .failure(error), urlRequest: urlRequest)
                 requestBehaviour.onFailure(error: error)
-                complete(response)
+                // complete(response)
+                resultPromise.succeed(response)
             }
         }
-        return cancellableRequest
+        return resultPromise.futureResult
     }
 
-    private func makeNetworkRequest<T>(request: APIRequest<T>, urlRequest: URLRequest, cancellableRequest: CancellableRequest, requestBehaviour: RequestBehaviourGroup, completionQueue: DispatchQueue, complete: @escaping (APIResponse<T>) -> Void) {
+    private func makeNetworkRequest<T>(request: APIRequest<T>, urlRequest: URLRequest, requestBehaviour: RequestBehaviourGroup) -> EventLoopFuture<APIResponse<T>> {
         requestBehaviour.beforeSend()
 
         if request.service.isUpload {
-            sessionManager.upload(
+            fatalError("TODO")
+            /*sessionManager.upload(
                 multipartFormData: { multipartFormData in
                     for (name, value) in request.formParameters {
                         if let file = value as? UploadFile {
@@ -133,26 +141,45 @@ public class APIClient {
                             complete(response)
                         }
                     }
-            })
+            })*/
         } else {
-            let networkRequest = sessionManager.request(urlRequest)
-                .responseData(queue: decodingQueue) { dataResponse in
-                    self.handleResponse(request: request, requestBehaviour: requestBehaviour, dataResponse: dataResponse, completionQueue: completionQueue, complete: complete)
-
+            let headers = urlRequest.allHTTPHeaderFields!.reduce(into: HTTPHeaders()) {
+                $0.add(name: $1.key, value: $1.value)
             }
-            cancellableRequest.networkRequest = networkRequest
+            do {
+                let req = try HTTPClient.Request(url: urlRequest.url!,
+                                             method: HTTPMethod(rawValue: urlRequest.httpMethod!),
+                                             headers: headers,
+                                             body: urlRequest.httpBody != nil ? .data(urlRequest.httpBody!) : nil)
+                return handleResponse(request: request,
+                                      urlRequest: urlRequest,
+                                      requestBehaviour: requestBehaviour,
+                                      response: httpClient.execute(request: req))
+            } catch {
+                return httpClient.eventLoopGroup.next().makeFailedFuture(error)
+            }
+            // cancellableRequest.networkRequest = networkRequest
         }
     }
 
-    private func handleResponse<T>(request: APIRequest<T>, requestBehaviour: RequestBehaviourGroup, dataResponse: DataResponse<Data>, completionQueue: DispatchQueue, complete: @escaping (APIResponse<T>) -> Void) {
+    private func handleResponse<T>(request: APIRequest<T>, urlRequest: URLRequest, requestBehaviour: RequestBehaviourGroup, response: EventLoopFuture<HTTPClient.Response>) -> EventLoopFuture<APIResponse<T>> {
 
-        let result: APIResult<T>
-
-        switch dataResponse.result {
-        case .success(let value):
+        
+        
+        func handleOnResponse(result: APIResult<T>, data: Data?) -> APIResponse<T> {
+            let response = APIResponse<T>(request: request, result: result, urlRequest: urlRequest, urlResponse: nil, data: data)
+            requestBehaviour.onResponse(response: response.asAny())
+            return response
+        }
+        
+        return response.flatMapThrowing({ res -> APIResponse<T> in
+            let bodyData = res.body != nil ? Data(buffer: res.body!) : nil
+            
+            let result: APIResult<T>
+            
             do {
-                let statusCode = dataResponse.response!.statusCode
-                let decoded = try T(statusCode: statusCode, data: value, decoder: jsonDecoder)
+                let statusCode = Int(res.status.code)
+                let decoded = try T(statusCode: statusCode, data: bodyData ?? Data(), decoder: self.jsonDecoder)
                 result = .success(decoded)
                 if decoded.successful {
                     requestBehaviour.onSuccess(result: decoded.response as Any)
@@ -170,20 +197,19 @@ public class APIClient {
                 result = .failure(apiError)
                 requestBehaviour.onFailure(error: apiError)
             }
-        case .failure(let error):
+            
+            return handleOnResponse(result: result, data: bodyData)
+        }).flatMapErrorThrowing { error in
             let apiError = APIClientError.networkError(error)
-            result = .failure(apiError)
+            let result = APIResult<T>.failure(apiError)
             requestBehaviour.onFailure(error: apiError)
+            return handleOnResponse(result: result, data: nil)
         }
-        let response = APIResponse<T>(request: request, result: result, urlRequest: dataResponse.request, urlResponse: dataResponse.response, data: dataResponse.data, timeline: dataResponse.timeline)
-        requestBehaviour.onResponse(response: response.asAny())
-
-        completionQueue.async {
-            complete(response)
-        }
+        
     }
 }
 
+/*
 public class CancellableRequest {
     /// The request used to make the actual network request
     public let request: AnyRequest
@@ -199,14 +225,14 @@ public class CancellableRequest {
             networkRequest.cancel()
         }
     }
-}
+}*/
 
 // Helper extension for sending requests
 extension APIRequest {
 
     /// makes a request using the default APIClient. Change your baseURL in APIClient.default.baseURL
-    public func makeRequest(complete: @escaping (APIResponse<ResponseType>) -> Void) {
-        APIClient.default.makeRequest(self, complete: complete)
+    public func makeRequest() -> EventLoopFuture<APIResponse<ResponseType>> {
+        return APIClient.default.makeRequest(self)
     }
 }
 
@@ -228,7 +254,9 @@ extension APIRequest {
             }
         }
         if !queryParams.isEmpty {
-            urlRequest = try URLEncoding.queryString.encode(urlRequest, with: queryParams)
+            var urlComps = URLComponents(url: url, resolvingAgainstBaseURL: false)!
+            urlComps.queryItems = queryParams.reduce(into: [], { $0.append(URLQueryItem(name: $1.key, value: "\($1.value)")) })
+            urlRequest.url = urlComps.url
         }
 
         var formParams: [String: Any] = [:]
@@ -238,7 +266,8 @@ extension APIRequest {
             }
         }
         if !formParams.isEmpty {
-            urlRequest = try URLEncoding.httpBody.encode(urlRequest, with: formParams)
+            // TODO:
+            // urlRequest = try URLEncoding.httpBody.encode(urlRequest, with: formParams)
         }
         if let encodeBody = encodeBody {
             urlRequest.httpBody = try encodeBody(encoder)
