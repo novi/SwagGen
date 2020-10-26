@@ -2,7 +2,7 @@
 
 import Foundation
 
-#if canImport(FoundationNetworking) && NO_USE_FOUNDATION_NETWORKING
+#if canImport(FoundationNetworking) && !SG_USE_FOUNDATION_NETWORKING
 
 public struct URLRequest {
     init(url: URL) {

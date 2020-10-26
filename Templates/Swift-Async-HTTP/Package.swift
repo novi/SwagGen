@@ -13,14 +13,10 @@ let package = Package(
         {% endfor %}
     ],
     targets: [
-        .target(name: "{{ options.name }}",
-            dependencies: [
+        .target(name: "{{ options.name }}", dependencies: [
           {% for dependency in options.dependencies %}
           "{{ dependency.pod }}",
           {% endfor %}
-            ],
-            path: "Sources",
-            swiftSettings: [ .define("NO_USE_FOUNDATION_NETWORKING") ]
-        )
+        ], path: "Sources")
     ]
 )
