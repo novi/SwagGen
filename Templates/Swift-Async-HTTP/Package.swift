@@ -1,4 +1,4 @@
-// swift-tools-version:4.0
+// swift-tools-version:5.0
 
 import PackageDescription
 
@@ -13,10 +13,14 @@ let package = Package(
         {% endfor %}
     ],
     targets: [
-        .target(name: "{{ options.name }}", dependencies: [
+        .target(name: "{{ options.name }}",
+            dependencies: [
           {% for dependency in options.dependencies %}
           "{{ dependency.pod }}",
           {% endfor %}
-        ], path: "Sources")
+            ],
+            path: "Sources",
+            swiftSettings: [ .define("NO_USE_FOUNDATION_NETWORKING") ]
+        )
     ]
 )

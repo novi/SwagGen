@@ -1,6 +1,9 @@
 {% include "Includes/Header.stencil" %}
 
 import Foundation
+#if canImport(FoundationNetworking) && !NO_USE_FOUNDATION_NETWORKING
+import FoundationNetworking
+#endif
 
 public protocol APIResponseValue: CustomDebugStringConvertible, CustomStringConvertible {
     associatedtype SuccessType

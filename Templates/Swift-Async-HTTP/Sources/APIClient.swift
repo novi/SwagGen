@@ -4,6 +4,9 @@ import Foundation
 import AsyncHTTPClient
 import NIO
 import NIOHTTP1
+#if canImport(FoundationNetworking) && !NO_USE_FOUNDATION_NETWORKING
+import FoundationNetworking
+#endif
 
 /// Manages and sends APIRequests
 public class APIClient {
