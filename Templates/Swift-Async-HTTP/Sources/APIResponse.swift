@@ -6,7 +6,7 @@ import FoundationNetworking
 #endif
 
 public protocol APIResponseValue: CustomDebugStringConvertible, CustomStringConvertible {
-    associatedtype SuccessType
+    associatedtype SuccessType{% if options.codableResponses %} : Codable{% endif %}
     var statusCode: Int { get }
     var successful: Bool { get }
     var response: Any { get }
